@@ -13,7 +13,61 @@ Smart Schematic generates **interactive linked PDFs** from Allegro BRD files and
 
 ---
 
-## Quick Start
+## Connect to This MCP Server (Copilot CLI)
+
+### 1. Clone this repo
+
+```powershell
+git clone https://github.com/Mark-YL/Smart_Schematic_MCP.git C:\Dev\Smart_Schematic_MCP
+```
+
+### 2. Install Python dependencies
+
+```powershell
+pip install PyMuPDF watchdog pystray Pillow selenium uiautomation pywin32
+```
+
+### 3. Register the MCP server
+
+Edit (or create) `%USERPROFILE%\.copilot\mcp-config.json` and add:
+
+```json
+{
+  "mcpServers": {
+    "smart-schematic": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["C:\\Dev\\Smart_Schematic_MCP\\smart_schematic_mcp_server.py"]
+    }
+  }
+}
+```
+
+> **Note:** Adjust the path if you cloned to a different location.
+
+### 4. Restart Copilot CLI
+
+The 6 Smart Schematic tools are now available in your Copilot conversations:
+
+| Tool | What It Does |
+|------|-------------|
+| `schematic_generate_linked_pdf` | Generate linked PDF from BRD + schematic pair |
+| `schematic_extract_components` | Extract component data from Allegro BRD binary |
+| `schematic_download_datasheets` | Download datasheets from OnePDM |
+| `schematic_list_parts` | List refdes → part number associations |
+| `schematic_start_watcher` | Start the auto-watcher |
+| `schematic_datasheet_status` | Check datasheet download progress |
+
+### 5. Try it
+
+Ask Copilot:
+```
+Generate a linked PDF for C:\Projects\MyBoard\schematic.pdf with C:\Projects\MyBoard\MyBoard.brd
+```
+
+---
+
+## Quick Start (Standalone)
 
 ### Option A: Automatic (Recommended)
 
