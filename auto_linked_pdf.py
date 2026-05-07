@@ -538,10 +538,9 @@ def main():
                     btn_frm = tk.Frame(root, bg='#f0f0f0')
                     btn_frm.pack(fill='x', padx=10, pady=(0, 5))
                     btn_style = dict(font=('Segoe UI', 9), relief='flat', cursor='hand2', padx=12, pady=3)
-                    changed = False
+                    state = {'changed': False}
 
                     def add_folder():
-                        global changed
                         d = filedialog.askdirectory(title='Select folder to monitor',
                                                    initialdir=os.path.expanduser('~'))
                         if d:
@@ -549,10 +548,9 @@ def main():
                             if d not in folders:
                                 folders.append(d)
                                 listbox.insert('end', d)
-                                changed = True
+                                state['changed'] = True
 
                     def remove_folder():
-                        global changed
                         sel = listbox.curselection()
                         if not sel:
                             messagebox.showwarning('Remove Folder', 'Select a folder to remove.')
@@ -560,7 +558,7 @@ def main():
                         idx = sel[0]
                         folders.pop(idx)
                         listbox.delete(idx)
-                        changed = True
+                        state['changed'] = True
 
                     tk.Button(btn_frm, text='+ Add Folder', command=add_folder,
                               bg='#27ae60', fg='white', **btn_style).pack(side='left', padx=(0,5))
@@ -616,7 +614,7 @@ def main():
                     close_frm.pack(fill='x', padx=10, pady=(0, 8))
 
                     def on_close():
-                        if changed:
+                        if state['changed']:
                             with open(RESULT_FILE, 'w', encoding='utf-8') as rf:
                                 json.dump(folders, rf)
                         try:
