@@ -1,0 +1,1 @@
+{"name":"smart-schematic","description":"Smart Schematic: generates linked PDFs from Allegro BRD + schematic, navigates to components, downloads datasheets from OnePDM","command":"python","args":["${SCRIPT_DIR}/servers/smart_schematic/smart_schematic_mcp_server.py"],"env":{}}
