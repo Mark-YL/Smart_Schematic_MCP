@@ -15,13 +15,37 @@ Smart Schematic generates **interactive linked PDFs** from Allegro BRD files and
 
 ## Connect to This MCP Server (Copilot CLI)
 
-### 1. Clone this repo
+### Quick Setup (2 commands)
+
+```powershell
+git clone https://github.com/Mark-YL/Smart_Schematic_MCP.git C:\Dev\Smart_Schematic_MCP
+pip install PyMuPDF watchdog pystray Pillow selenium uiautomation pywin32
+```
+
+Then in Copilot CLI, run:
+```
+/mcp add smart-schematic stdio python C:\Dev\Smart_Schematic_MCP\smart_schematic_mcp_server.py
+```
+
+That's it! The tools are now available in your Copilot conversations.
+
+---
+
+### Alternative: Auto-Registered When Working in This Repo
+
+This repo includes `.copilot/mcp-config.json` — if you open Copilot CLI while inside the cloned repo directory, the MCP server is **automatically registered** with no manual config needed.
+
+---
+
+### Manual Setup (Step by Step)
+
+#### 1. Clone this repo
 
 ```powershell
 git clone https://github.com/Mark-YL/Smart_Schematic_MCP.git C:\Dev\Smart_Schematic_MCP
 ```
 
-### 2. Install Python dependencies
+#### 2. Install Python dependencies
 
 ```powershell
 pip install PyMuPDF watchdog pystray Pillow selenium uiautomation pywin32

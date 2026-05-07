@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "smart-schematic": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["${workspaceFolder}/smart_schematic_mcp_server.py"]
+    }
+  }
+}
