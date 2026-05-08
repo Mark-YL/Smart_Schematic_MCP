@@ -407,6 +407,17 @@ def main():
     for w in args.watch:
         watch_dirs.append(os.path.abspath(w))
 
+    # Restore previously saved folders from UI
+    _saved_folders = os.path.join(os.environ.get('TEMP', '.'), 'ss_watch_folders.json')
+    if os.path.exists(_saved_folders):
+        try:
+            saved = json.load(open(_saved_folders, encoding='utf-8'))
+            for f in saved:
+                if f not in watch_dirs and os.path.isdir(f):
+                    watch_dirs.append(f)
+        except Exception:
+            pass
+
     # Ensure all directories exist
     for d in watch_dirs:
         os.makedirs(d, exist_ok=True)
@@ -539,6 +550,7 @@ def main():
                     btn_frm.pack(fill='x', padx=10, pady=(0, 5))
                     btn_style = dict(font=('Segoe UI', 9), relief='flat', cursor='hand2', padx=12, pady=3)
                     state = {'changed': False}
+                    status_var = tk.StringVar(value=f'Monitoring {len(folders)} folder(s)')
 
                     def add_folder():
                         d = filedialog.askdirectory(title='Select folder to monitor',
@@ -549,6 +561,7 @@ def main():
                                 folders.append(d)
                                 listbox.insert('end', d)
                                 state['changed'] = True
+                                status_var.set(f'Monitoring {len(folders)} folder(s)')
 
                     def remove_folder():
                         sel = listbox.curselection()
@@ -559,6 +572,7 @@ def main():
                         folders.pop(idx)
                         listbox.delete(idx)
                         state['changed'] = True
+                        status_var.set(f'Monitoring {len(folders)} folder(s)')
 
                     tk.Button(btn_frm, text='+ Add Folder', command=add_folder,
                               bg='#27ae60', fg='white', **btn_style).pack(side='left', padx=(0,5))
@@ -604,7 +618,6 @@ def main():
                     refresh_activity()
 
                     # --- Status bar ---
-                    status_var = tk.StringVar(value=f'Monitoring {len(folders)} folder(s)')
                     status_bar = tk.Label(root, textvariable=status_var, font=('Segoe UI', 8),
                                           bg='#dfe6e9', fg='#2d3436', anchor='w', padx=8, pady=3)
                     status_bar.pack(fill='x', side='bottom')
@@ -661,6 +674,12 @@ def main():
                         icon.title = f"Smart Schematic v2.1 — Watching {len(watch_dirs)} folders"
                         notify("Folders Updated",
                                f"Now watching {len(watch_dirs)} folder(s)")
+                        # Persist folder list for next restart
+                        try:
+                            with open(_saved_folders, 'w', encoding='utf-8') as sf:
+                                json.dump(watch_dirs, sf)
+                        except Exception:
+                            pass
 
             threading.Thread(target=_wait_for_ui, daemon=True).start()
 
