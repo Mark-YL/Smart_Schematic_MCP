@@ -138,13 +138,14 @@ def extract_refdes_part_pairs(pdf_path, comp_data_path=None):
     return associations
 
 
-def download_worker(tasks, output_dir, progress_file, progress_callback=None):
+def download_worker(tasks, output_dir, progress_file, progress_callback=None, cancel_event=None):
     """Background worker that downloads datasheets from OnePDM.
     
     tasks: list of (refdes, part_number) tuples
     output_dir: base datasheets/ directory
     progress_file: JSON file tracking download status
     progress_callback: optional callable(current, total, message) for progress updates
+    cancel_event: optional threading.Event — set to cancel download
     """
     # Load or init progress
     progress = {}
@@ -171,6 +172,11 @@ def download_worker(tasks, output_dir, progress_file, progress_callback=None):
     failed = 0
 
     for i, (refdes, pn) in enumerate(tasks):
+        # Check for cancellation
+        if cancel_event and cancel_event.is_set():
+            print(f"[datasheets] Download cancelled by user at {i}/{total}", flush=True)
+            break
+
         folder_name = f"{refdes}_{pn}"
         key = folder_name
 

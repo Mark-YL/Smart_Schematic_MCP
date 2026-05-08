@@ -40,7 +40,12 @@ _tray_icon = None
 _activity_log = []  # list of (timestamp, message) tuples
 _activity_lock = threading.Lock()
 _ACTIVITY_FILE = os.path.join(os.environ.get('TEMP', '.'), 'ss_activity.json')
+_DS_CANCEL_FILE = os.path.join(os.environ.get('TEMP', '.'), 'ss_ds_cancel')
+_DS_RESUME_FILE = os.path.join(os.environ.get('TEMP', '.'), 'ss_ds_resume')
+_SCAN_TRIGGER_FILE = os.path.join(os.environ.get('TEMP', '.'), 'ss_scan_trigger')
+_ds_cancel_event = threading.Event()
 _SETTINGS_FILE = os.path.join(os.environ.get('TEMP', '.'), 'ss_settings.json')
+_last_ds_context = {}  # stores last download context for resume
 
 def _load_settings():
     """Load user settings (returns dict with defaults)."""
@@ -221,7 +226,8 @@ def process_pair(folder, pdf_name, brd_name):
     comp_data = os.path.join(folder, "component_data.json")
     net_data = os.path.join(folder, "net_data.json")
 
-    _log_activity(f"[Processing] {pdf_name} + {brd_name}")
+    _log_activity(f"[Processing] {folder}\\{pdf_name} + {brd_name}")
+    notify("Processing", f"{pdf_name} + {brd_name}")
     log.info(f"{'='*50}")
     log.info(f"Processing: {pdf_name} + {brd_name}")
     log.info(f"Folder: {folder}")
@@ -231,6 +237,7 @@ def process_pair(folder, pdf_name, brd_name):
         log.info(f"  Waiting for {name} to stabilize...")
         if not wait_for_stable_file(path):
             log.error(f"  {name} never stabilized — skipping")
+            notify("Error", f"{name} never stabilized")
             return False
 
     # Step 1: Extract component data from BRD binary (no Allegro needed)
@@ -240,6 +247,7 @@ def process_pair(folder, pdf_name, brd_name):
         components = extract_components_from_brd(brd_path)
         if not components:
             log.error(f"  No components found in {brd_name}")
+            notify("Error", f"No components found in {brd_name}")
             return False
         with open(comp_data, "w") as f:
             json.dump(components, f, indent=2)
@@ -253,6 +261,7 @@ def process_pair(folder, pdf_name, brd_name):
             log.info(f"  Extracted {len(nets)} net names → {os.path.basename(net_data)}")
     except Exception as e:
         log.error(f"  Component extraction failed: {e}")
+        notify("Error", f"Component extraction failed: {e}")
         return False
 
     # Step 2: Generate linked PDF
@@ -270,10 +279,12 @@ def process_pair(folder, pdf_name, brd_name):
         result = subprocess.run(gen_cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
             log.error(f"  generate_linked_pdf failed:\n{result.stderr}")
+            notify("Error", f"Linked PDF generation failed")
             return False
         log.info(f"  generate_linked_pdf output:\n{result.stdout}")
     except subprocess.TimeoutExpired:
         log.error(f"  generate_linked_pdf timed out (5 min)")
+        notify("Error", "Linked PDF generation timed out (5 min)")
         return False
 
     log.info(f"  ✅ Done! Check folder for *_linked_Acrobat.pdf")
@@ -286,42 +297,60 @@ def process_pair(folder, pdf_name, brd_name):
     if not settings.get('download_datasheets', True):
         log.info(f"  [Step 3] Datasheet download disabled — skipping")
     else:
-        log.info(f"  [Step 3] Starting background datasheet download...")
-        try:
-            from download_datasheets import extract_refdes_part_pairs, download_worker
-            associations = extract_refdes_part_pairs(pdf_path, comp_data)
-            if associations:
-                ds_dir = os.path.join(folder, "datasheets")
-                os.makedirs(ds_dir, exist_ok=True)
-                # Deduplicate by part number
-                seen_pn = {}
-                tasks = []
-                for refdes, pn in sorted(associations.items()):
-                    if pn not in seen_pn:
-                        seen_pn[pn] = refdes
-                        tasks.append((refdes, pn))
-                log.info(f"  Found {len(tasks)} unique parts — downloading in background")
-                _log_activity(f"[Datasheets] Starting download of {len(tasks)} parts")
-                progress_file = os.path.join(ds_dir, "_progress.json")
-                # Save part map
-                with open(os.path.join(ds_dir, "_part_map.json"), 'w') as f:
-                    json.dump(associations, f, indent=2)
+        _launch_datasheet_download(pdf_path, comp_data, folder)
 
-                def _ds_progress(current, total, name):
-                    _log_activity(f"[Datasheets] {current}/{total} - {name}")
+def _launch_datasheet_download(pdf_path, comp_data, folder):
+    """Launch or resume datasheet download for a project folder."""
+    log.info(f"  [Step 3] Starting background datasheet download...")
+    try:
+        from download_datasheets import extract_refdes_part_pairs, download_worker
+        associations = extract_refdes_part_pairs(pdf_path, comp_data)
+        if associations:
+            ds_dir = os.path.join(folder, "datasheets")
+            os.makedirs(ds_dir, exist_ok=True)
+            seen_pn = {}
+            tasks = []
+            for refdes, pn in sorted(associations.items()):
+                if pn not in seen_pn:
+                    seen_pn[pn] = refdes
+                    tasks.append((refdes, pn))
+            log.info(f"  Found {len(tasks)} unique parts — downloading in background")
+            _log_activity(f"[Datasheets] Starting download of {len(tasks)} parts")
+            progress_file = os.path.join(ds_dir, "_progress.json")
+            with open(os.path.join(ds_dir, "_part_map.json"), 'w') as f:
+                json.dump(associations, f, indent=2)
 
-                # Launch background thread
-                t = threading.Thread(
-                    target=download_worker,
-                    args=(tasks, ds_dir, progress_file),
-                    kwargs={"progress_callback": _ds_progress},
-                    daemon=True
-                )
-                t.start()
-            else:
-                log.info(f"  No part numbers found in PDF — skipping datasheet download")
-        except Exception as e:
-            log.warning(f"  Datasheet download setup failed: {e}")
+            # Save context for resume
+            _last_ds_context.update({
+                'pdf_path': pdf_path, 'comp_data': comp_data, 'folder': folder
+            })
+
+            def _ds_progress(current, total, name):
+                _log_activity(f"[Datasheets] {current}/{total} - {name}")
+                if os.path.exists(_DS_CANCEL_FILE):
+                    _ds_cancel_event.set()
+                    _log_activity("[Datasheets] Download stopped by user")
+                    try:
+                        os.unlink(_DS_CANCEL_FILE)
+                    except OSError:
+                        pass
+
+            _ds_cancel_event.clear()
+            if os.path.exists(_DS_CANCEL_FILE):
+                os.unlink(_DS_CANCEL_FILE)
+
+            t = threading.Thread(
+                target=download_worker,
+                args=(tasks, ds_dir, progress_file),
+                kwargs={"progress_callback": _ds_progress,
+                        "cancel_event": _ds_cancel_event},
+                daemon=True
+            )
+            t.start()
+        else:
+            log.info(f"  No part numbers found in PDF — skipping datasheet download")
+    except Exception as e:
+        log.warning(f"  Datasheet download setup failed: {e}")
 
     return True
 
@@ -534,6 +563,9 @@ def main():
                 f.write(f"RESULT_FILE = {repr(result_file)}\n")
                 f.write(f"SETTINGS_FILE = {repr(settings_file)}\n")
                 f.write(f"ACTIVITY_FILE = {repr(activity_file)}\n")
+                f.write(f"DS_CANCEL_FILE = {repr(_DS_CANCEL_FILE)}\n")
+                f.write(f"DS_RESUME_FILE = {repr(_DS_RESUME_FILE)}\n")
+                f.write(f"SCAN_TRIGGER_FILE = {repr(_SCAN_TRIGGER_FILE)}\n")
                 f.write(f"SCRIPT_FILE = {repr(tmp)}\n\n")
                 f.write(textwrap.dedent("""\
                     folders = json.load(open(STATE_FILE, encoding='utf-8'))
@@ -611,6 +643,12 @@ def main():
                               bg='#27ae60', fg='white', **btn_style).pack(side='left', padx=(0,5))
                     tk.Button(btn_frm, text='- Remove', command=remove_folder,
                               bg='#e74c3c', fg='white', **btn_style).pack(side='left', padx=(0,5))
+                    def scan_folders():
+                        with open(SCAN_TRIGGER_FILE, 'w') as sf:
+                            sf.write('scan')
+                        messagebox.showinfo('Scan', 'Scanning watched folders for existing PDF + BRD pairs...')
+                    tk.Button(btn_frm, text='Scan Now', command=scan_folders,
+                              bg='#3498db', fg='white', **btn_style).pack(side='right')
 
                     # --- Settings Section ---
                     settings_frm = tk.Frame(root, bg='#f0f0f0')
@@ -622,11 +660,53 @@ def main():
                     tk.Checkbutton(settings_frm, text='Download datasheets from OnePDM',
                                    variable=ds_var, command=on_ds_toggle,
                                    font=('Segoe UI', 9), bg='#f0f0f0',
-                                   activebackground='#f0f0f0').pack(anchor='w')
+                                   activebackground='#f0f0f0').pack(side='left')
+                    def stop_download():
+                        with open(DS_CANCEL_FILE, 'w') as cf:
+                            cf.write('cancel')
+                        messagebox.showinfo('Stop Download', 'Datasheet download will stop after the current item.')
+                    def resume_download():
+                        with open(DS_RESUME_FILE, 'w') as rf:
+                            rf.write('resume')
+                        messagebox.showinfo('Resume Download', 'Datasheet download will resume shortly.')
+                    tk.Button(settings_frm, text='Resume', command=resume_download,
+                              bg='#2980b9', fg='white', font=('Segoe UI', 8), relief='flat',
+                              cursor='hand2', padx=8, pady=1).pack(side='right', padx=(0,5))
+                    tk.Button(settings_frm, text='Stop', command=stop_download,
+                              bg='#e67e22', fg='white', font=('Segoe UI', 8), relief='flat',
+                              cursor='hand2', padx=8, pady=1).pack(side='right')
 
                     # --- Activity Log Section ---
-                    tk.Label(root, text='Activity Log:', font=('Segoe UI', 9, 'bold'),
-                             bg='#f0f0f0', anchor='w').pack(fill='x', padx=10, pady=(5,2))
+                    log_hdr = tk.Frame(root, bg='#f0f0f0')
+                    log_hdr.pack(fill='x', padx=10, pady=(5,2))
+                    tk.Label(log_hdr, text='Activity Log:', font=('Segoe UI', 9, 'bold'),
+                             bg='#f0f0f0', anchor='w').pack(side='left')
+                    def clear_log():
+                        with open(ACTIVITY_FILE, 'w', encoding='utf-8') as af:
+                            json.dump([], af)
+                    tk.Button(log_hdr, text='Clear', command=clear_log,
+                              font=('Segoe UI', 7), relief='flat', bg='#bdc3c7',
+                              cursor='hand2', padx=6).pack(side='right')
+                    def open_folder():
+                        sel = listbox.curselection()
+                        folder = folders[sel[0]] if sel else (folders[0] if folders else None)
+                        if folder and os.path.isdir(folder):
+                            os.startfile(folder)
+                    tk.Button(log_hdr, text='Open Folder', command=open_folder,
+                              font=('Segoe UI', 7), relief='flat', bg='#8e44ad', fg='white',
+                              cursor='hand2', padx=6).pack(side='right', padx=(0,5))
+                    def reprocess():
+                        sel = listbox.curselection()
+                        folder = folders[sel[0]] if sel else None
+                        if not folder:
+                            messagebox.showwarning('Re-process', 'Select a folder first.')
+                            return
+                        with open(SCAN_TRIGGER_FILE, 'w') as sf:
+                            sf.write('scan')
+                        messagebox.showinfo('Re-process', f'Re-scanning {folder}...')
+                    tk.Button(log_hdr, text='Re-process', command=reprocess,
+                              font=('Segoe UI', 7), relief='flat', bg='#16a085', fg='white',
+                              cursor='hand2', padx=6).pack(side='right', padx=(0,5))
 
                     log_frm = tk.Frame(root, bg='#f0f0f0')
                     log_frm.pack(fill='both', expand=True, padx=10, pady=(0,5))
@@ -639,6 +719,18 @@ def main():
                                        relief='flat', state='disabled', padx=6, pady=4)
                     log_text.pack(fill='both', expand=True)
                     log_scroll.config(command=log_text.yview)
+
+                    # --- Download Progress Bar ---
+                    import re as _re
+                    prog_frm = tk.Frame(root, bg='#f0f0f0')
+                    prog_frm.pack(fill='x', padx=10, pady=(0,3))
+                    prog_lbl = tk.Label(prog_frm, text='', font=('Segoe UI', 8),
+                                        bg='#f0f0f0', fg='#2d3436', anchor='w')
+                    prog_lbl.pack(side='left')
+                    prog_canvas = tk.Canvas(prog_frm, height=12, bg='#ecf0f1',
+                                            highlightthickness=0)
+                    prog_canvas.pack(fill='x', expand=True, padx=(5,0))
+                    prog_bar = prog_canvas.create_rectangle(0, 0, 0, 12, fill='#27ae60', width=0)
 
                     def refresh_activity():
                         try:
@@ -656,6 +748,28 @@ def main():
                         else:
                             for ts, msg in entries[-20:]:
                                 log_text.insert('end', f'[{ts}] {msg}\\n')
+                        log_text.see('end')
+                        log_text.config(state='disabled')
+                        # Update progress bar from last datasheet entry
+                        ds_progress = None
+                        for ts, msg in reversed(entries):
+                            m = _re.search(r'\\[Datasheets\\] (\\d+)/(\\d+)', msg)
+                            if m:
+                                ds_progress = (int(m.group(1)), int(m.group(2)))
+                                break
+                        if ds_progress:
+                            cur, total = ds_progress
+                            pct = cur / total if total > 0 else 0
+                            w = prog_canvas.winfo_width()
+                            prog_canvas.coords(prog_bar, 0, 0, int(w * pct), 12)
+                            prog_lbl.config(text=f'Datasheets: {cur}/{total}')
+                            if cur >= total:
+                                prog_canvas.itemconfig(prog_bar, fill='#27ae60')
+                            else:
+                                prog_canvas.itemconfig(prog_bar, fill='#3498db')
+                        else:
+                            prog_lbl.config(text='')
+                            prog_canvas.coords(prog_bar, 0, 0, 0, 12)
                         log_text.see('end')
                         log_text.config(state='disabled')
                         root.after(2000, refresh_activity)
@@ -729,6 +843,35 @@ def main():
                             pass
 
             threading.Thread(target=_wait_for_ui, daemon=True).start()
+
+        def _resume_watcher():
+            """Background thread that watches for resume/scan signals from UI."""
+            while True:
+                time.sleep(2)
+                if os.path.exists(_DS_RESUME_FILE):
+                    try:
+                        os.unlink(_DS_RESUME_FILE)
+                    except OSError:
+                        pass
+                    if _last_ds_context:
+                        _log_activity("[Datasheets] Resuming download...")
+                        _launch_datasheet_download(
+                            _last_ds_context['pdf_path'],
+                            _last_ds_context['comp_data'],
+                            _last_ds_context['folder']
+                        )
+                    else:
+                        _log_activity("[Datasheets] No previous download to resume")
+                if os.path.exists(_SCAN_TRIGGER_FILE):
+                    try:
+                        os.unlink(_SCAN_TRIGGER_FILE)
+                    except OSError:
+                        pass
+                    _log_activity("[Scan] Scanning watched folders...")
+                    for d in watch_dirs:
+                        startup_sweep(d)
+
+        threading.Thread(target=_resume_watcher, daemon=True).start()
 
         def _on_quit(icon, item):
             icon.stop()
