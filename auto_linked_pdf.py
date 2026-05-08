@@ -40,6 +40,27 @@ _tray_icon = None
 _activity_log = []  # list of (timestamp, message) tuples
 _activity_lock = threading.Lock()
 _ACTIVITY_FILE = os.path.join(os.environ.get('TEMP', '.'), 'ss_activity.json')
+_SETTINGS_FILE = os.path.join(os.environ.get('TEMP', '.'), 'ss_settings.json')
+
+def _load_settings():
+    """Load user settings (returns dict with defaults)."""
+    defaults = {'download_datasheets': True}
+    try:
+        if os.path.exists(_SETTINGS_FILE):
+            with open(_SETTINGS_FILE, encoding='utf-8') as f:
+                saved = json.load(f)
+            defaults.update(saved)
+    except Exception:
+        pass
+    return defaults
+
+def _save_settings(settings):
+    """Persist user settings."""
+    try:
+        with open(_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f)
+    except Exception:
+        pass
 
 def _log_activity(msg):
     """Record an activity event (kept in memory + written to temp file for UI)."""
@@ -260,43 +281,47 @@ def process_pair(folder, pdf_name, brd_name):
     # Auto-start navigation server so PDF links work immediately
     ensure_server_running()
 
-    # Step 3: Download datasheets in background
-    log.info(f"  [Step 3] Starting background datasheet download...")
-    try:
-        from download_datasheets import extract_refdes_part_pairs, download_worker
-        associations = extract_refdes_part_pairs(pdf_path, comp_data)
-        if associations:
-            ds_dir = os.path.join(folder, "datasheets")
-            os.makedirs(ds_dir, exist_ok=True)
-            # Deduplicate by part number
-            seen_pn = {}
-            tasks = []
-            for refdes, pn in sorted(associations.items()):
-                if pn not in seen_pn:
-                    seen_pn[pn] = refdes
-                    tasks.append((refdes, pn))
-            log.info(f"  Found {len(tasks)} unique parts — downloading in background")
-            _log_activity(f"[Datasheets] Starting download of {len(tasks)} parts")
-            progress_file = os.path.join(ds_dir, "_progress.json")
-            # Save part map
-            with open(os.path.join(ds_dir, "_part_map.json"), 'w') as f:
-                json.dump(associations, f, indent=2)
+    # Step 3: Download datasheets in background (if enabled)
+    settings = _load_settings()
+    if not settings.get('download_datasheets', True):
+        log.info(f"  [Step 3] Datasheet download disabled — skipping")
+    else:
+        log.info(f"  [Step 3] Starting background datasheet download...")
+        try:
+            from download_datasheets import extract_refdes_part_pairs, download_worker
+            associations = extract_refdes_part_pairs(pdf_path, comp_data)
+            if associations:
+                ds_dir = os.path.join(folder, "datasheets")
+                os.makedirs(ds_dir, exist_ok=True)
+                # Deduplicate by part number
+                seen_pn = {}
+                tasks = []
+                for refdes, pn in sorted(associations.items()):
+                    if pn not in seen_pn:
+                        seen_pn[pn] = refdes
+                        tasks.append((refdes, pn))
+                log.info(f"  Found {len(tasks)} unique parts — downloading in background")
+                _log_activity(f"[Datasheets] Starting download of {len(tasks)} parts")
+                progress_file = os.path.join(ds_dir, "_progress.json")
+                # Save part map
+                with open(os.path.join(ds_dir, "_part_map.json"), 'w') as f:
+                    json.dump(associations, f, indent=2)
 
-            def _ds_progress(current, total, name):
-                _log_activity(f"[Datasheets] {current}/{total} - {name}")
+                def _ds_progress(current, total, name):
+                    _log_activity(f"[Datasheets] {current}/{total} - {name}")
 
-            # Launch background thread
-            t = threading.Thread(
-                target=download_worker,
-                args=(tasks, ds_dir, progress_file),
-                kwargs={"progress_callback": _ds_progress},
-                daemon=True
-            )
-            t.start()
-        else:
-            log.info(f"  No part numbers found in PDF — skipping datasheet download")
-    except Exception as e:
-        log.warning(f"  Datasheet download setup failed: {e}")
+                # Launch background thread
+                t = threading.Thread(
+                    target=download_worker,
+                    args=(tasks, ds_dir, progress_file),
+                    kwargs={"progress_callback": _ds_progress},
+                    daemon=True
+                )
+                t.start()
+            else:
+                log.info(f"  No part numbers found in PDF — skipping datasheet download")
+        except Exception as e:
+            log.warning(f"  Datasheet download setup failed: {e}")
 
     return True
 
@@ -491,6 +516,7 @@ def main():
             # Write current folders to a temp JSON for the UI to read
             state_file = os.path.join(os.environ.get('TEMP', '.'), 'ss_watch_state.json')
             result_file = os.path.join(os.environ.get('TEMP', '.'), 'ss_watch_result.json')
+            settings_file = _SETTINGS_FILE
             activity_file = _ACTIVITY_FILE
             with open(state_file, 'w', encoding='utf-8') as f:
                 json.dump(watch_dirs, f)
@@ -506,14 +532,21 @@ def main():
                 f.write("import json, os, sys\n\n")
                 f.write(f"STATE_FILE = {repr(state_file)}\n")
                 f.write(f"RESULT_FILE = {repr(result_file)}\n")
+                f.write(f"SETTINGS_FILE = {repr(settings_file)}\n")
                 f.write(f"ACTIVITY_FILE = {repr(activity_file)}\n")
                 f.write(f"SCRIPT_FILE = {repr(tmp)}\n\n")
                 f.write(textwrap.dedent("""\
                     folders = json.load(open(STATE_FILE, encoding='utf-8'))
+                    settings = {}
+                    if os.path.exists(SETTINGS_FILE):
+                        try:
+                            settings = json.load(open(SETTINGS_FILE, encoding='utf-8'))
+                        except Exception:
+                            pass
 
                     root = tk.Tk()
                     root.title('Smart Schematic v2.1 - Folder Monitor')
-                    root.attributes('-topmost', True)
+                    root.attributes('-topmost', False)
                     root.resizable(True, True)
                     root.geometry('560x480')
                     root.configure(bg='#f0f0f0')
@@ -579,6 +612,18 @@ def main():
                     tk.Button(btn_frm, text='- Remove', command=remove_folder,
                               bg='#e74c3c', fg='white', **btn_style).pack(side='left', padx=(0,5))
 
+                    # --- Settings Section ---
+                    settings_frm = tk.Frame(root, bg='#f0f0f0')
+                    settings_frm.pack(fill='x', padx=10, pady=(5, 0))
+                    ds_var = tk.BooleanVar(value=settings.get('download_datasheets', True))
+                    def on_ds_toggle():
+                        settings['download_datasheets'] = ds_var.get()
+                        state['changed'] = True
+                    tk.Checkbutton(settings_frm, text='Download datasheets from OnePDM',
+                                   variable=ds_var, command=on_ds_toggle,
+                                   font=('Segoe UI', 9), bg='#f0f0f0',
+                                   activebackground='#f0f0f0').pack(anchor='w')
+
                     # --- Activity Log Section ---
                     tk.Label(root, text='Activity Log:', font=('Segoe UI', 9, 'bold'),
                              bg='#f0f0f0', anchor='w').pack(fill='x', padx=10, pady=(5,2))
@@ -630,6 +675,8 @@ def main():
                         if state['changed']:
                             with open(RESULT_FILE, 'w', encoding='utf-8') as rf:
                                 json.dump(folders, rf)
+                            with open(SETTINGS_FILE, 'w', encoding='utf-8') as sf:
+                                json.dump(settings, sf)
                         try:
                             os.unlink(SCRIPT_FILE)
                         except OSError:
